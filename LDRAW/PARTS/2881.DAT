@@ -1,7 +1,10 @@
-0 Train Cantenery
+0 Hinge Train Pantograph Shoe
 0 Name: 2881.dat
 0 Author: James Jessiman
-0 Original LDraw Part - LDraw beta 0.27 Archive
+0 Original LDraw Part
+0 LDRAW_ORG Part UPDATE 2002-01
+
+0 KEYWORDS cantenary, rod, bar, grille
 
  1 16 0 12 0 0 0 1 0 1 0 1 0 0 h2.dat
 
@@ -53,3 +56,4 @@
 
  1 16 26 4 -8 0 -52 0 4 0 0 0 0 4 4-4cyli.dat
  1 16 26 4 8 0 -52 0 4 0 0 0 0 4 4-4cyli.dat
+0
