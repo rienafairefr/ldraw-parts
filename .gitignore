@@ -1,0 +1,5 @@
+repo/
+zips/
+versions/
+*.sqlite
+full_versions/
