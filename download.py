@@ -3,13 +3,14 @@ import os
 import shutil
 import zipfile
 from datetime import timedelta
-from distutils.dir_util import copy_tree
+from subprocess import check_output
+from urllib.error import HTTPError
 from urllib.request import urlretrieve
 from xml.etree import ElementTree as ET
 
 import requests
 import requests_cache
-from git import Repo
+from git import Repo, GitCommandError
 
 requests_cache.install_cache('ldraw_parts', expire_after=timedelta(weeks=2))
 
@@ -23,111 +24,169 @@ def ensure_exists(path):
 logger = logging.getLogger(__name__)
 
 LDRAW_URL = "http://www.ldraw.org/library/updates/%s"
-LDRAW_PTRELEASES = "https://www.ldraw.org/cgi-bin/ptreleases.cgi?type=ZIP"
+LDRAW_PTRELEASES = "https://www.ldraw.org/cgi-bin/ptreleases.cgi"
+
+ARCHIVES_DIR = "archives"
+VERSIONS_DIR = "versions"
+FULL_VERSIONS_DIR = "full_versions"
+SCRATCH_FULL_VERSION_DIR = f"fs/full_version"
+REPO_DIR = "fs/repo"
+
+
+def without_keys(d, keys):
+    return {x: d[x] for x in d if x not in keys}
 
 
 def get_ptreleases():
     ptreleases = ET.parse(requests.get(LDRAW_PTRELEASES).raw)
-    return [
+    releases = [
         {ch.tag: ch.text for ch in el} for el in ptreleases.findall(".//distribution")
     ]
+    for r in releases:
+        if r['release_id'] == "0.27":
+            # "base" release
+            r['release_id'] = "2002-00"
+
+    unsorted = {
+        r['release_id']: without_keys(r, ["release_id"]) for r in releases
+    }
+
+    return dict(sorted(unsorted.items()))
 
 
-PTRELEASES = get_ptreleases()
+VERSIONS = get_ptreleases()
 BASE = "2002-00"  # version 0.27
-VERSIONS = (
-        ["0.27"]
-        + [el["release_id"] for el in PTRELEASES if el["release_id"] >= BASE]
-        + ["latest"]
-)
 
 
-def unpack_version(version, zips_dir, versions_dir):
+def unpack_version(version, archives_dir, versions_dir):
     version_dir = os.path.join(versions_dir, version)
     if not os.path.exists(version_dir):
-        version_zip = os.path.join(zips_dir, f"{version}.zip")
-        print(f"unzipping the zip {version} in {version_dir}...")
-        zip_ref = zipfile.ZipFile(version_zip, "r")
-        zip_ref.extractall(version_dir)
-        zip_ref.close()
+        try:
+            version_zip = os.path.join(archives_dir, f"{version}.zip")
+            print(f"unzipping the zip {version} in {version_dir}...")
+            zip_ref = zipfile.ZipFile(version_zip, "r")
+            zip_ref.extractall(version_dir)
+            zip_ref.close()
+        except OSError:
+            version_arj = os.path.join(archives_dir, f"{version}.exe")
+            print(f"extracting the ARJ {version} in {version_dir}...")
+            check_output(["arj", "x", version_arj, f"{version_dir}/", "*", "-y"])
 
 
-def download_single_version(version, zips_dir):
-    if version == "latest":
-        filename = "complete.zip"
-    elif version == "0.27":
-        filename = "ldraw027.zip"
+def download_single_version(version, archives_dir):
+    if version == "2002-00":
+        filename = "ldraw027"
     else:
         short_version = version[2:4] + version[5:]
-        filename = f"lcad{short_version}.zip"
+        filename = f"lcad{short_version}"
 
-    ldraw_url = LDRAW_URL % filename
+    prefixes = (".zip", ".exe")
 
-    retrieved = os.path.join(zips_dir, f"{version}.zip")
-    if not os.path.exists(retrieved):
-        print(f'retrieving {version}...')
-        retrieved_, _ = urlretrieve(ldraw_url)
-        shutil.copy(retrieved_, retrieved)
+    if not any(os.path.exists(os.path.join(archives_dir, f"{version}{prefix}")) for prefix in prefixes):
+        for prefix in (".zip", ".exe"):
+            try:
+                ldraw_url = LDRAW_URL % filename + prefix
+
+                retrieved = os.path.join(archives_dir, f"{version}{prefix}")
+                print(f'retrieving {version}...')
+                retrieved_, _ = urlretrieve(ldraw_url)
+                shutil.copy(retrieved_, retrieved)
+                break
+            except HTTPError as e:
+                if e.code == 404:
+                    # only a .exe available
+                    continue
 
 
-def previous_merge(version):
+def previous_merge(version, full_versions_dir, versions_dir):
     logger.debug("recursive_merge")
-    ensure_exists(os.path.join("full_versions", version))
-    previous_versions = [up for up in VERSIONS if up <= version]
+    full_version_dir = os.path.join(full_versions_dir, version)
+    if os.path.exists(full_version_dir):
+        return
+    ensure_exists(full_version_dir)
+    previous_versions = [rid for rid in VERSIONS if rid <= version]
     for previous_version in previous_versions:
-        if os.path.exists(os.path.join("full_versions", version)):
-            continue
         print(f'{previous_version} => {version}')
-        copy_tree(
-            os.path.join("versions", previous_version),
-            os.path.join("full_versions", version)
+        version_dir = os.path.join(versions_dir, previous_version)
+
+        if "ldraw" in (f.lower() for f in os.listdir(version_dir)):
+            destination_dir = SCRATCH_FULL_VERSION_DIR
+        else:
+            # some releases
+            destination_dir = os.path.join(SCRATCH_FULL_VERSION_DIR, "ldraw")
+
+        shutil.copytree(
+            version_dir,
+            destination_dir,
+            dirs_exist_ok=True
+
         )
+    shutil.copytree(
+        SCRATCH_FULL_VERSION_DIR,
+        full_version_dir,
+        dirs_exist_ok=True
+    )
+    empty_dir(SCRATCH_FULL_VERSION_DIR)
 
 
-def download_all_zip():
-    ensure_exists("zips")
-    for update in VERSIONS:
-        download_single_version(update, "zips")
+def download_all_archives():
+    ensure_exists(ARCHIVES_DIR)
+    for version in VERSIONS:
+        download_single_version(version, ARCHIVES_DIR)
 
 
-def unpack_all_zip():
-    ensure_exists("versions")
-    for update in VERSIONS:
-        unpack_version(update, "zips", "versions")
+def unpack_all_archives():
+    ensure_exists(VERSIONS_DIR)
+    for version in VERSIONS:
+        unpack_version(version, ARCHIVES_DIR, VERSIONS_DIR)
 
 
 def merge_all():
-    ensure_exists("full_versions")
-    for update in VERSIONS:
-        previous_merge(update)
+    ensure_exists(FULL_VERSIONS_DIR)
+    for version in VERSIONS:
+        previous_merge(version, FULL_VERSIONS_DIR, VERSIONS_DIR)
+
+
+def empty_dir(dir):
+    for root, dirs, files in os.walk(dir):
+        for f in files:
+            os.remove(os.path.join(root, f))
+        for d in dirs:
+            shutil.rmtree(os.path.join(root, d))
 
 
 def main():
-    download_all_zip()
-    unpack_all_zip()
+    download_all_archives()
+    unpack_all_archives()
     merge_all()
 
-    ensure_exists("repo")
-    repo = Repo.clone_from("git@github.com:rienafairefr/ldraw-parts.git", 'repo')
+    empty_dir(REPO_DIR)
+    repo = Repo.clone_from("git@github.com:rienafairefr/ldraw-parts.git", REPO_DIR)
     git = repo.git
+
+    os.environ['GIT_COMMITTER_NAME'] = git.config('--get', 'user.name')
+    os.environ['GIT_COMMITTER_EMAIL'] = git.config('--get', 'user.EMAIL')
 
     # initialize 'library' to an orphan root
     git.checkout('--orphan', "library")
-    git.commit("--allow-empty", "-m", "initial commit")
+    git.reset('--hard')
 
     for version in VERSIONS:
         print(f'committing {version}')
-        copy_tree(
-            os.path.join("full_versions", version),
-            "repo"
+        previous_merge(version, FULL_VERSIONS_DIR, VERSIONS_DIR)
+        shutil.copytree(
+            os.path.join(FULL_VERSIONS_DIR, version),
+            REPO_DIR,
+            dirs_exist_ok=True
         )
+        shutil.rmtree(os.path.join(FULL_VERSIONS_DIR, version))
 
         git.add("-A")
-        git.commit("-m", f"{version}")
-        git.tag(version)
+        git.commit(f"--date={VERSIONS[version]['release_date']}", "--author", "PTAdmin <parts@ldraw.org>", "-m", f"{version}")
+        git.tag("-f", version)
 
     git.push("--set-upstream", "origin", "library")
-    git.push("--tags")
+    git.push("--force", "--tags")
 
 
 if __name__ == '__main__':

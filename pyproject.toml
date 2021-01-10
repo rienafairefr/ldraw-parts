@@ -10,6 +10,7 @@ pymklist = "^1.1.0"
 requests = "^2.25.1"
 requests-cache = "^0.5.2"
 GitPython = "^3.1.12"
+ordereddict = "^1.1"
 
 [tool.poetry.dev-dependencies]
 

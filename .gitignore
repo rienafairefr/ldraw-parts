@@ -3,3 +3,7 @@ zips/
 versions/
 *.sqlite
 full_versions/
+archives/
+fs/
+
+loopbackfile.img
